@@ -4,40 +4,36 @@ import Image from "next/image";
 import { createClient } from "@supabase/supabase-js";
 import * as faceapi from "face-api.js";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || "",
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || ""
-);
+// Replace with your Supabase URL and Key
+const supabase = createClient(yourSupabaseUrl, yourSupabaseAnonKey);
+
+// const supabase = createClient(
+//   "https://simbwfrefchsfqlxvxhq.supabase.co",
+//   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNpbWJ3ZnJlZmNoc2ZxbHh2eGhxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDY3Mjc4ODIsImV4cCI6MjA2MjMwMzg4Mn0.0tjn1Q4ZE5a_Utq5u8O0vCM7rKu3UNkKxbpMsqCIJFI"
+// );
 
 export default function Home() {
   const [image, setImage] = useState<string | null>(null);
   const [result, setResult] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   // Load face-api.js models
   const loadModels = async () => {
-    try {
-      await Promise.all([
-        faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
-        faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
-        faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
-      ]);
-      console.log("Models loaded successfully");
-    } catch (err) {
-      console.error("Model loading error:", err);
-      throw new Error("Failed to load face recognition models");
-    }
+    await Promise.all([
+      faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
+      faceapi.nets.faceLandmark68Net.loadFromUri("/models"),
+      faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
+    ]);
   };
 
   // Handle image upload
-  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files ? e.target.files[0] : null;
+  const handleImageUpload = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ): Promise<void> => {
+    const file: File | null = e.target.files ? e.target.files[0] : null;
     if (file) {
       setImage(URL.createObjectURL(file));
       await verifyFace(file);
-    } else {
-      setError("No file selected");
     }
   };
 
@@ -54,30 +50,28 @@ export default function Home() {
       canvas.height = 480;
       const ctx = canvas.getContext("2d");
 
-      if (!ctx) {
-        throw new Error("Failed to get canvas context");
-      }
-
       setTimeout(() => {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        stream.getTracks().forEach((track) => track.stop());
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          stream.getTracks().forEach((track) => track.stop());
+        } else {
+          console.error("Failed to get canvas context");
+          setResult("Error processing image");
+        }
 
-        canvas.toBlob(
-          async (blob) => {
-            if (blob) {
-              setImage(URL.createObjectURL(blob));
-              await verifyFace(blob);
-            } else {
-              throw new Error("Failed to create blob from canvas");
-            }
-          },
-          "image/jpeg",
-          0.9
-        );
+        canvas.toBlob(async (blob) => {
+          if (blob) {
+            setImage(URL.createObjectURL(blob));
+            await verifyFace(blob);
+          } else {
+            console.error("Failed to create blob from canvas");
+            setResult("Error processing image");
+          }
+        });
       }, 1000);
     } catch (error) {
       console.error("Camera error:", error);
-      setError("Error accessing camera: " + (error as Error).message);
+      setResult("Error accessing camera");
     }
   };
 
@@ -86,28 +80,22 @@ export default function Home() {
     descriptor: number[];
   }
 
-  const verifyFace = async (file: File | Blob) => {
+  const verifyFace = async (file: File | Blob): Promise<void> => {
     setIsLoading(true);
     setResult(null);
-    setError(null);
 
     try {
-      // Load models
       await loadModels();
 
       // Process uploaded/captured image
       const img = await faceapi.bufferToImage(file);
-      if (!img) {
-        throw new Error("Failed to load image");
-      }
-
       const detection = await faceapi
         .detectSingleFace(img)
         .withFaceLandmarks()
         .withFaceDescriptor();
 
       if (!detection) {
-        setResult("No face detected in the image");
+        setResult("No face detected");
         setIsLoading(false);
         return;
       }
@@ -115,13 +103,15 @@ export default function Home() {
       const uploadedDescriptor = detection.descriptor;
 
       // Fetch stored face descriptors from Supabase
-      const { data: storedFaces, error: dbError } = await supabase
+      const { data: storedFaces, error } = await supabase
         .from<FaceDescriptor>("faces")
         .select("descriptor");
 
-      if (dbError) {
-        console.error("Supabase error:", dbError);
-        throw new Error("Error fetching data from database");
+      if (error) {
+        console.error("Supabase error:", error);
+        setResult("Error checking database");
+        setIsLoading(false);
+        return;
       }
 
       // Compare with stored descriptors
@@ -129,7 +119,9 @@ export default function Home() {
       let matchFound = false;
 
       for (const face of storedFaces || []) {
-        const storedDescriptor = new Float32Array(face.descriptor);
+        const storedDescriptor = new Float32Array(
+          Object.values(face.descriptor)
+        );
         const distance = faceapi.euclideanDistance(
           uploadedDescriptor,
           storedDescriptor
@@ -143,20 +135,15 @@ export default function Home() {
 
       setResult(matchFound ? "Face match found!" : "No match found");
 
-      // Store new face if no match found
+      // Optionally store new face
       if (!matchFound) {
-        const { error: insertError } = await supabase
+        await supabase
           .from("faces")
-          .insert([{ descriptor: Array.from(uploadedDescriptor) }]);
-
-        if (insertError) {
-          console.error("Insert error:", insertError);
-          setError("Failed to store new face");
-        }
+          .insert([{ descriptor: uploadedDescriptor }]);
       }
     } catch (error) {
       console.error("Verification error:", error);
-      setError(`Error processing image: ${(error as Error).message}`);
+      setResult("Error processing image");
     }
 
     setIsLoading(false);
@@ -175,26 +162,23 @@ export default function Home() {
         />
         <button
           onClick={handleCameraCapture}
-          className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600"
+          className="bg-blue-500 text-white px-4 py-2 rounded"
         >
           Capture from Camera
         </button>
       </div>
-
       {image && (
         <Image
           src={image}
           alt="Uploaded"
           width={320}
           height={240}
-          className="max-w-xs mb-4 rounded"
-          priority
+          className="max-w-xs mb-4"
         />
       )}
 
-      {isLoading && <p className="text-gray-600">Processing...</p>}
-      {result && <p className="text-lg text-green-600">{result}</p>}
-      {error && <p className="text-lg text-red-600">{error}</p>}
+      {isLoading && <p>Processing...</p>}
+      {result && <p className="text-lg">{result}</p>}
     </div>
   );
 }
